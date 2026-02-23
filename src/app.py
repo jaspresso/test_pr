@@ -49,29 +49,65 @@ def predict_next_day(df, fast=False):
     model.fit(X.iloc[:-1], y)
     return model.predict(X.tail(1))[0]
 
+# -------------------------
+# [수정된] 이슈 키워드 심층 분석 로직 (v3.9.2)
+# -------------------------
 def get_sentiment(ticker, name="종목"):
     try:
         tk = yf.Ticker(ticker)
         news = tk.news
-        if not news: return 0.0, "현재 탐지된 실시간 이슈가 없습니다."
-        scores = [TextBlob(n['title']).sentiment.polarity for n in news[:5]]
-        avg_score = np.mean(scores)
-        all_titles = " ".join([n['title'].lower() for n in news[:10]])
+        
+        # 1. 뉴스 데이터가 없거나 형식이 이상할 경우 섹터 지수로 대체
+        if not news or not isinstance(news, list):
+            # 삼성전자/하이닉스 등 반도체 종목일 경우 필라델피아 반도체 지수 뉴스 참조
+            if any(k in name for k in ["삼성", "하이닉스", "반도체", "Electronics"]):
+                tk_backup = yf.Ticker("^SOX")
+                news = tk_backup.news
+            else:
+                tk_backup = yf.Ticker("^IXIC") # 일반 종목은 나스닥 종합 뉴스 참조
+                news = tk_backup.news
+
+        if not news:
+            return 0.0, "현재 글로벌 시장에서 집계된 실시간 이슈가 제한적입니다."
+
+        # 2. 감성 점수 분석 (키 이름 유연하게 대응: 'title' 또는 'headline')
+        valid_scores = []
+        all_titles = ""
+        
+        for n in news[:10]:
+            # 'title'이 없으면 'headline'을 찾고, 둘 다 없으면 무시
+            content = n.get('title') or n.get('headline') or n.get('summary')
+            if content:
+                all_titles += content.lower() + " "
+                valid_scores.append(TextBlob(content).sentiment.polarity)
+
+        if not valid_scores:
+            return 0.0, f"현재 {name}에 대한 구체적인 뉴스 텍스트를 분석할 수 없습니다."
+
+        avg_score = np.mean(valid_scores)
+        
+        # 3. 키워드 기반 이슈 라벨링
         keywords = {
-            "반도체/HBM": ["hbm", "semiconductor", "chip", "nvidia", "sk hynix"],
-            "공급계약/수주": ["contract", "supply", "deal", "order", "partnership"],
-            "실적발표/성장": ["earnings", "profit", "growth", "revenue", "surge"],
-            "정부정책/밸류업": ["value-up", "government", "policy", "dividend", "tax"],
-            "거시경제/금리": ["fed", "inflation", "rate", "nasdaq"]
+            "반도체/AI": ["hbm", "semiconductor", "chip", "nvidia", "ai", "foundry"],
+            "공급계약/파트너십": ["contract", "supply", "deal", "order", "partnership"],
+            "실적/재무동향": ["earnings", "profit", "growth", "revenue", "guidance"],
+            "거시경제/정책": ["fed", "inflation", "rate", "value-up", "policy"]
         }
+        
         found_labels = [label for label, keys in keywords.items() if any(k in all_titles for k in keys)]
+        
+        # 4. 리포트 문장 조합
         if found_labels:
-            issue_text = f"현재 **{', '.join(found_labels)}** 관련 이슈가 포착되었습니다. "
-            issue_text += f"글로벌 뉴스 심리는 **{('긍정' if avg_score > 0 else '신중')}**한 상태입니다."
+            summary = f"현재 **{', '.join(found_labels)}** 관련 글로벌 이슈가 감지되고 있습니다. "
+            summary += f"심리 지수는 **{avg_score:.2f}**로 **{('긍정적' if avg_score > 0 else '신중한')}** 흐름을 보입니다."
         else:
-            issue_text = f"현재 {name}은(는) 개별 이슈보다는 기술적 수급에 의해 움직이고 있습니다. (최신 헤드라인: \"{news[0]['title']}\")"
-        return avg_score, issue_text
-    except: return 0.0, "뉴스 데이터를 분석할 수 없습니다."
+            summary = f"특이 이슈는 없으나 글로벌 시장의 일반적인 흐름을 따르고 있습니다. (감성 지수: {avg_score:.2f})"
+            
+        return avg_score, summary
+
+    except Exception as e:
+        # 어떤 에러가 나도 시스템이 멈추지 않도록 안전하게 반환
+        return 0.0, f"이슈 분석 엔진 일시 중단 (데이터 구조 최적화 필요)"
 
 def run_backtest_simple(df):
     if len(df) < 30: return 0.0
